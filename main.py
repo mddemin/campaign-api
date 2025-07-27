@@ -7,16 +7,25 @@ This module demonstrates:
     1. Authentication with Revcontent API using client_credentials
     2. Creating a new campaign (Boost) with targeting criteria
     3. Fetching campaign statistics
-    4. Error handling and mocked responses for testing
+    4. Custom exception classes for proper error handling
+    5. Comprehensive unit testing with mocked responses
 
 Example:
     Basic usage:
     
+        from main import RevcontentAPI, RevcontentConfig, AuthenticationError, CampaignCreationError
+        
         config = RevcontentConfig()
         api = RevcontentAPI(config)
-        api.authenticate()
-        campaign = api.create_campaign("Test Campaign", bid_amount=0.35, budget=50.0)
-        stats = api.get_campaign_stats(campaign.id)
+        
+        try:
+            api.authenticate()
+            campaign = api.create_campaign("Test Campaign", bid_amount=0.35, budget=50.0)
+            stats = api.get_campaign_stats(campaign.id)
+        except AuthenticationError as e:
+            print(f"Authentication failed: {e}")
+        except CampaignCreationError as e:
+            print(f"Campaign creation failed: {e}")
 """
 
 import requests
@@ -29,6 +38,26 @@ import unittest
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class RevcontentAPIError(Exception):
+    """Base exception for Revcontent API errors."""
+    pass
+
+
+class AuthenticationError(RevcontentAPIError):
+    """Raised when authentication fails or is required."""
+    pass
+
+
+class CampaignCreationError(RevcontentAPIError):
+    """Raised when campaign creation fails."""
+    pass
+
+
+class StatsRetrievalError(RevcontentAPIError):
+    """Raised when statistics retrieval fails."""
+    pass
 
 
 @dataclass
@@ -176,7 +205,7 @@ class RevcontentAPI:
         budget: Union[str, float] = "unlimited",
         country_codes: Optional[List[str]] = None,
         tracking_code: Optional[str] = None,
-    ) -> Optional[Campaign]:
+    ) -> Campaign:
         """Create a new campaign (Boost) with targeting criteria.
 
         Args:
@@ -187,15 +216,16 @@ class RevcontentAPI:
             tracking_code (Optional[str]): UTM tracking code.
 
         Returns:
-            Optional[Campaign]: Campaign object if creation was successful, None otherwise.
+            Campaign: Campaign object if creation was successful.
 
         Raises:
+            AuthenticationError: If not authenticated.
+            CampaignCreationError: If campaign creation fails.
             ValueError: If any parameters are invalid.
-            requests.exceptions.RequestException: If the API request fails.
         """
         if not self.auth_token:
             logger.error("Not authenticated")
-            return None
+            raise AuthenticationError("Not authenticated. Call authenticate() first.")
 
         # Basic validation
         if bid_amount < 0.01:
@@ -232,28 +262,30 @@ class RevcontentAPI:
                 logger.info(f"Campaign created successfully: {campaign.id}")
                 return campaign
             else:
-                logger.error(f"Campaign creation failed: {response_data.get('errors', 'Unknown error')}")
-                return None
+                error_msg = f"Campaign creation failed: {response_data.get('errors', 'Unknown error')}"
+                logger.error(error_msg)
+                raise CampaignCreationError(error_msg)
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Campaign creation failed: {e}")
-            return None
+            raise CampaignCreationError(f"Campaign creation failed: {e}") from e
 
-    def get_campaign_stats(self, campaign_id: str) -> Optional[CampaignStats]:
+    def get_campaign_stats(self, campaign_id: str) -> CampaignStats:
         """Fetch statistics for a specific campaign.
 
         Args:
             campaign_id (str): Unique identifier of the campaign.
 
         Returns:
-            Optional[CampaignStats]: CampaignStats object if retrieval was successful, None otherwise.
+            CampaignStats: CampaignStats object if retrieval was successful.
 
         Raises:
-            requests.exceptions.RequestException: If the API request fails.
+            AuthenticationError: If not authenticated.
+            StatsRetrievalError: If statistics retrieval fails.
         """
         if not self.auth_token:
             logger.error("Not authenticated")
-            return None
+            raise AuthenticationError("Not authenticated. Call authenticate() first.")
 
         try:
             stats_url = f"{self.config.base_url}/stats/boosts/{campaign_id}"
@@ -274,7 +306,7 @@ class RevcontentAPI:
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Stats retrieval failed: {e}")
-            return None
+            raise StatsRetrievalError(f"Stats retrieval failed: {e}") from e
 
 
 def print_campaign_results(campaign: Campaign, stats: CampaignStats) -> None:
@@ -348,23 +380,23 @@ def main() -> None:
             return
 
         # Step 2: Create campaign
-        campaign = api.create_campaign(
-            name="Test Campaign - YourName",
-            bid_amount=0.35,
-            budget=50.00,
-            country_codes=["US"],
-            tracking_code="utm_source=revcontent"
-        )
-
-        if not campaign:
-            print("Campaign creation failed!")
+        try:
+            campaign = api.create_campaign(
+                name="Test Campaign - YourName",
+                bid_amount=0.35,
+                budget=50.00,
+                country_codes=["US"],
+                tracking_code="utm_source=revcontent"
+            )
+        except (AuthenticationError, CampaignCreationError, ValueError) as e:
+            print(f"Campaign creation failed: {e}")
             return
 
         # Step 3: Fetch stats
-        stats = api.get_campaign_stats(campaign.id)
-
-        if not stats:
-            print("Stats retrieval failed!")
+        try:
+            stats = api.get_campaign_stats(campaign.id)
+        except (AuthenticationError, StatsRetrievalError) as e:
+            print(f"Stats retrieval failed: {e}")
             return
 
         # Step 4: Print results
@@ -414,11 +446,9 @@ class TestRevcontentAPI(unittest.TestCase):
             country_codes=["US"]
         )
 
-        self.assertIsNotNone(result)
-        if result:
-            self.assertEqual(result.id, "test_campaign_123")
-            self.assertEqual(result.name, "Test Campaign")
-            self.assertEqual(result.bid_amount, 0.35)
+        self.assertEqual(result.id, "test_campaign_123")
+        self.assertEqual(result.name, "Test Campaign")
+        self.assertEqual(result.bid_amount, 0.35)
 
     @patch("requests.Session.get")
     def test_stats_retrieval(self, mock_get: Mock) -> None:
@@ -437,11 +467,9 @@ class TestRevcontentAPI(unittest.TestCase):
 
         result = self.api.get_campaign_stats("test_campaign_123")
 
-        self.assertIsNotNone(result)
-        if result:
-            self.assertEqual(result.impressions, 1000)
-            self.assertEqual(result.clicks, 50)
-            self.assertEqual(result.ctr, 0.05)
+        self.assertEqual(result.impressions, 1000)
+        self.assertEqual(result.clicks, 50)
+        self.assertEqual(result.ctr, 0.05)
 
     def test_campaign_validation(self) -> None:
         """Test campaign parameter validation."""
@@ -454,6 +482,16 @@ class TestRevcontentAPI(unittest.TestCase):
         # Test invalid budget
         with self.assertRaises(ValueError):
             self.api.create_campaign("Test", budget=0.5)
+
+    def test_authentication_required(self) -> None:
+        """Test that methods raise AuthenticationError when not authenticated."""
+        # Test campaign creation without authentication
+        with self.assertRaises(AuthenticationError):
+            self.api.create_campaign("Test Campaign")
+
+        # Test stats retrieval without authentication
+        with self.assertRaises(AuthenticationError):
+            self.api.get_campaign_stats("test_id")
 
 
 if __name__ == "__main__":
